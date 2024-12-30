@@ -6,9 +6,15 @@ from supabase import create_client
 import io
 import json
 
+# Load environment variables
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
 # Supabase configuration
-SUPABASE_URL = "https://ulfhuybjlxhrhezfjzzk.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVsZmh1eWJqbHhocmhlemZqenprIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTczNTU4MjQ0NywiZXhwIjoyMDUxMTU4NDQ3fQ.IkT0aJ1_8TQcR02cxZEeOP93Sx4X6gD7WPO3nU351T0"
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 # Initialize Supabase client
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -92,13 +98,42 @@ def save_uploaded_data(df, username):
         df['workDate'] = pd.to_datetime(df['workDate'])
         df['duration_minutes'] = df['duration'].apply(parse_duration)
         df['payout_amount'] = df['payout'].apply(parse_amount)
+        df['month_year'] = df['workDate'].dt.strftime('%Y-%m')
         
-        # Convert to records for Supabase insertion
-        records = df.to_dict('records')
+        # Convert timestamps to ISO format strings
+        df['workDate'] = df['workDate'].dt.strftime('%Y-%m-%d')
+        
+        # Create a new DataFrame with exact column names matching the database
+        data_to_save = {
+            'username': df['username'],
+            'workDate': df['workDate'],
+            'duration': df['duration'],
+            'duration_minutes': df['duration_minutes'],
+            'payout': df['payout'],
+            'payout_amount': df['payout_amount'],
+            'payType': df['payType'],
+            'status': df['status'],
+            'month_year': df['month_year']
+        }
+        
+        # Handle itemID if it exists
+        if 'itemID' in df.columns:
+            data_to_save['itemID'] = df['itemID']
+        elif 'itemId' in df.columns:
+            data_to_save['itemID'] = df['itemId']
+        else:
+            data_to_save['itemID'] = pd.Series([None] * len(df))
+            
+        # Create final DataFrame
+        df_final = pd.DataFrame(data_to_save)
+        
+        # Convert to records and ensure all None values are properly handled
+        records = df_final.replace({pd.NA: None}).to_dict('records')
         
         # Insert records into Supabase
         response = supabase.table('work_data').insert(records).execute()
         return True
+        
     except Exception as e:
         st.error(f"Error saving data: {str(e)}")
         return False
