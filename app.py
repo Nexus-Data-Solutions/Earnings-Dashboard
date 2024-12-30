@@ -5,11 +5,10 @@ from datetime import datetime
 from supabase import create_client
 import io
 import json
-
-# Load environment variables
 from dotenv import load_dotenv
 import os
 
+# Load environment variables
 load_dotenv()
 
 # Supabase configuration
@@ -91,7 +90,7 @@ def validate_dataframe(df):
     return True
 
 def save_uploaded_data(df, username):
-    """Save uploaded data to Supabase"""
+    """Save uploaded data to Supabase with duplicate handling"""
     try:
         # Process the dataframe
         df['username'] = username
@@ -128,10 +127,36 @@ def save_uploaded_data(df, username):
         df_final = pd.DataFrame(data_to_save)
         
         # Convert to records and ensure all None values are properly handled
-        records = df_final.replace({pd.NA: None}).to_dict('records')
+        new_records = df_final.replace({pd.NA: None}).to_dict('records')
         
-        # Insert records into Supabase
-        response = supabase.table('work_data').insert(records).execute()
+        # Get existing records for this user
+        existing_data = supabase.table('work_data').select('itemID').eq('username', username).execute()
+        existing_item_ids = set(item['itemID'] for item in existing_data.data if item['itemID'])
+        
+        # Separate new records into updates and inserts
+        records_to_insert = []
+        records_to_update = []
+        
+        for record in new_records:
+            if record['itemID'] and record['itemID'] in existing_item_ids:
+                records_to_update.append(record)
+            else:
+                records_to_insert.append(record)
+        
+        # Perform updates for existing records
+        for record in records_to_update:
+            supabase.table('work_data')\
+                .update(record)\
+                .eq('itemID', record['itemID'])\
+                .eq('username', username)\
+                .execute()
+        
+        # Insert new records
+        if records_to_insert:
+            supabase.table('work_data').insert(records_to_insert).execute()
+        
+        total_processed = len(records_to_update) + len(records_to_insert)
+        st.success(f"Processed {total_processed} records: {len(records_to_insert)} new, {len(records_to_update)} updated")
         return True
         
     except Exception as e:
@@ -165,6 +190,83 @@ def load_user_data(username):
     except Exception as e:
         st.error(f"Error loading user data: {str(e)}")
         return None
+
+def delete_user_data(username, start_date=None, end_date=None, specific_ids=None):
+    """Delete user data based on different criteria"""
+    try:
+        query = supabase.table('work_data').delete().eq('username', username)
+        
+        if specific_ids:
+            query = query.in_('itemID', specific_ids)
+        elif start_date and end_date:
+            query = query.gte('workDate', start_date).lte('workDate', end_date)
+            
+        response = query.execute()
+        return True
+    except Exception as e:
+        st.error(f"Error deleting data: {str(e)}")
+        return False
+
+def show_delete_options():
+    """Show delete options in the sidebar"""
+    with st.sidebar:
+        st.write("🗑️ Delete Records")
+        delete_option = st.selectbox(
+            "Choose delete option",
+            ["Delete by Date Range", "Delete Specific Records", "Delete All My Records"]
+        )
+        
+        if delete_option == "Delete by Date Range":
+            st.write("Select date range to delete:")
+            start_date = st.date_input("Start Date")
+            end_date = st.date_input("End Date")
+            
+            if st.button("Delete Records in Range", key="delete_range"):
+                if start_date and end_date:
+                    if delete_user_data(
+                        st.session_state.username,
+                        start_date.strftime('%Y-%m-%d'),
+                        end_date.strftime('%Y-%m-%d')
+                    ):
+                        st.success("Records deleted successfully!")
+                        st.rerun()
+                        
+        elif delete_option == "Delete Specific Records":
+            # Load user's data to show available records
+            df = load_user_data(st.session_state.username)
+            if df is not None and not df.empty:
+                # Show recent records with their IDs
+                st.write("Recent Records:")
+                records_to_show = df.sort_values('workDate', ascending=False).head(10)
+                records_view = records_to_show[['workDate', 'payType', 'payout', 'itemID']]
+                st.dataframe(records_view)
+                
+                # Multi-select for IDs
+                selected_ids = st.multiselect(
+                    "Select records to delete",
+                    options=records_to_show['itemID'].tolist(),
+                    format_func=lambda x: f"Record {x}"
+                )
+                
+                if st.button("Delete Selected Records", key="delete_selected"):
+                    if selected_ids:
+                        if delete_user_data(st.session_state.username, specific_ids=selected_ids):
+                            st.success("Selected records deleted successfully!")
+                            st.rerun()
+            else:
+                st.info("No records available to delete.")
+                
+        elif delete_option == "Delete All My Records":
+            st.warning("⚠️ This will delete ALL your records!")
+            confirm = st.text_input("Type 'DELETE' to confirm")
+            
+            if st.button("Delete All My Records", key="delete_all"):
+                if confirm == "DELETE":
+                    if delete_user_data(st.session_state.username):
+                        st.success("All records deleted successfully!")
+                        st.rerun()
+                else:
+                    st.error("Please type 'DELETE' to confirm")
 
 def calculate_user_metrics(df):
     """Calculate basic metrics for a user's data"""
@@ -405,52 +507,6 @@ def show_user_dashboard(df):
     st.dataframe(recent_df[['workDate', 'duration', 'payout', 'payType', 'status']], 
                 use_container_width=True)
 
-def admin_panel():
-    st.title("👑 Admin Panel")
-    
-    # User Management Section
-    st.header("User Management")
-    
-    # Add New User
-    st.subheader("Add New User")
-    new_username = st.text_input("Username", key="new_user")
-    new_password = st.text_input("Password", type="password", key="new_pass")
-    
-    if st.button("Add User"):
-        if new_username and new_password:
-            if create_user(new_username, new_password):
-                st.success(f"User '{new_username}' created successfully!")
-            else:
-                st.error("Error creating user")
-        else:
-            st.error("Please fill in both fields")
-    
-    # View/Delete Users
-    st.subheader("Existing Users")
-    try:
-        response = supabase.table('users').select('*').execute()
-        if response.data:
-            user_df = pd.DataFrame(response.data)
-            st.dataframe(user_df[['username', 'role']], use_container_width=True)
-            
-            # Delete User
-            non_admin_users = user_df[user_df['role'] != 'admin']['username'].tolist()
-            user_to_delete = st.selectbox("Select user to delete", non_admin_users)
-            
-            if st.button("Delete User"):
-                if user_to_delete:
-                    try:
-                        # Delete user's work data first
-                        supabase.table('work_data').delete().eq('username', user_to_delete).execute()
-                        # Then delete the user
-                        supabase.table('users').delete().eq('username', user_to_delete).execute()
-                        st.success(f"User '{user_to_delete}' deleted successfully!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error deleting user: {str(e)}")
-    except Exception as e:
-        st.error(f"Error loading users: {str(e)}")
-
 def show_dashboard():
     if not st.session_state.get('uploaded_file'):
         uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
@@ -475,16 +531,11 @@ def show_dashboard():
             show_admin_dashboard(df)
         else:
             show_user_dashboard(df)
-        
-        if st.button("Clear uploaded data"):
-            try:
-                if st.session_state.user_role != "admin":
-                    supabase.table('work_data').delete().eq('username', st.session_state.username).execute()
-                st.session_state.uploaded_file = None
-                st.success("Data cleared successfully!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error clearing data: {str(e)}")
+            show_delete_options()
+            
+        if st.button("Clear uploaded file", key="clear_file"):
+            st.session_state.uploaded_file = None
+            st.rerun()
     else:
         st.info("No data available. Please upload a CSV file.")
 
