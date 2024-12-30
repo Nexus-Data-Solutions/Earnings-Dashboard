@@ -2,50 +2,53 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
+from supabase import create_client
+import io
 import json
-from pathlib import Path
-import os
+
+# Supabase configuration
+SUPABASE_URL = "https://ulfhuybjlxhrhezfjzzk.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVsZmh1eWJqbHhocmhlemZqenprIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTczNTU4MjQ0NywiZXhwIjoyMDUxMTU4NDQ3fQ.IkT0aJ1_8TQcR02cxZEeOP93Sx4X6gD7WPO3nU351T0"
+
+# Initialize Supabase client
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Page config
 st.set_page_config(page_title="Work Analytics Dashboard", layout="wide")
 
-# Create necessary directories and files
-Path("data").mkdir(exist_ok=True)
-USERS_FILE = Path("data/users.json")
-
-# Initialize users file with admin if it doesn't exist
-if not USERS_FILE.exists():
-    default_users = {
-        "admin": {
-            "password": "admin123",  # Change this in production
-            "role": "admin"
-        }
-    }
-    with open(USERS_FILE, "w") as f:
-        json.dump(default_users, f)
-
 # Authentication functions
-def load_users():
-    with open(USERS_FILE, "r") as f:
-        return json.load(f)
-
-def save_user(username, password, role="user"):
-    users = load_users()
-    users[username] = {
-        "password": password,
-        "role": role
-    }
-    with open(USERS_FILE, "w") as f:
-        json.dump(users, f)
+def create_user(username, password, role="user"):
+    """Create a new user in Supabase"""
+    try:
+        response = supabase.table('users').insert({
+            'username': username,
+            'password': password,  # In production, use proper password hashing
+            'role': role
+        }).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error creating user: {str(e)}")
+        return False
 
 def check_credentials(username, password):
-    users = load_users()
-    return (username in users and 
-            users[username]["password"] == password)
+    """Verify user credentials"""
+    try:
+        response = supabase.table('users').select('*').eq('username', username).eq('password', password).execute()
+        return len(response.data) > 0
+    except Exception as e:
+        st.error(f"Error checking credentials: {str(e)}")
+        return False
 
 def get_user_role(username):
-    users = load_users()
-    return users.get(username, {}).get("role", "user")
+    """Get user role from Supabase"""
+    try:
+        response = supabase.table('users').select('role').eq('username', username).execute()
+        if response.data:
+            return response.data[0]['role']
+        return "user"
+    except Exception as e:
+        st.error(f"Error getting user role: {str(e)}")
+        return "user"
 
 # Data processing functions
 def parse_duration(duration_str):
@@ -82,55 +85,51 @@ def validate_dataframe(df):
     return True
 
 def save_uploaded_data(df, username):
-    """Save uploaded data to user-specific CSV file"""
-    data_dir = Path("data/user_data")
-    data_dir.mkdir(exist_ok=True)
-    
-    # Always set the username column to ensure correct attribution
-    df['username'] = username
-    
-    # Save to user-specific file
-    file_path = data_dir / f"{username}_data.csv"
-    df.to_csv(file_path, index=False)
-
-def process_dataframe(df):
-    """Process dataframe with all necessary transformations"""
-    df['workDate'] = pd.to_datetime(df['workDate'])
-    df['duration_minutes'] = df['duration'].apply(parse_duration)
-    df['payout_amount'] = df['payout'].apply(parse_amount)
-    return df
+    """Save uploaded data to Supabase"""
+    try:
+        # Process the dataframe
+        df['username'] = username
+        df['workDate'] = pd.to_datetime(df['workDate'])
+        df['duration_minutes'] = df['duration'].apply(parse_duration)
+        df['payout_amount'] = df['payout'].apply(parse_amount)
+        
+        # Convert to records for Supabase insertion
+        records = df.to_dict('records')
+        
+        # Insert records into Supabase
+        response = supabase.table('work_data').insert(records).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error saving data: {str(e)}")
+        return False
 
 def load_all_users_data():
-    """Load and combine data from all users"""
-    data_dir = Path("data/user_data")
-    data_dir.mkdir(exist_ok=True)
-    
-    all_data = []
-    for file_path in data_dir.glob("*.csv"):
-        try:
-            df = pd.read_csv(file_path)
-            df = process_dataframe(df)
-            all_data.append(df)
-        except Exception as e:
-            st.error(f"Error loading {file_path.name}: {str(e)}")
-    
-    if all_data:
-        combined_df = pd.concat(all_data, ignore_index=True)
-        return combined_df
-    return None
+    """Load all users' data from Supabase"""
+    try:
+        response = supabase.table('work_data').select('*').execute()
+        if response.data:
+            df = pd.DataFrame(response.data)
+            df['workDate'] = pd.to_datetime(df['workDate'])
+            df['month_year'] = df['workDate'].dt.strftime('%Y-%m')
+            return df
+        return None
+    except Exception as e:
+        st.error(f"Error loading all data: {str(e)}")
+        return None
 
 def load_user_data(username):
-    """Load data for a specific user"""
-    file_path = Path("data/user_data") / f"{username}_data.csv"
-    if file_path.exists():
-        try:
-            df = pd.read_csv(file_path)
-            df = process_dataframe(df)
+    """Load specific user's data from Supabase"""
+    try:
+        response = supabase.table('work_data').select('*').eq('username', username).execute()
+        if response.data:
+            df = pd.DataFrame(response.data)
+            df['workDate'] = pd.to_datetime(df['workDate'])
+            df['month_year'] = df['workDate'].dt.strftime('%Y-%m')
             return df
-        except Exception as e:
-            st.error(f"Error loading user data: {str(e)}")
-            return None
-    return None
+        return None
+    except Exception as e:
+        st.error(f"Error loading user data: {str(e)}")
+        return None
 
 def calculate_user_metrics(df):
     """Calculate basic metrics for a user's data"""
@@ -153,7 +152,6 @@ def calculate_user_metrics(df):
             'total_tasks': 0
         }
 
-# Dashboard components
 def show_admin_dashboard(df):
     st.title("👑 Admin Dashboard")
     
@@ -171,6 +169,91 @@ def show_admin_dashboard(df):
         st.metric("Total Platform Time", f"{hours}h {minutes}m")
     with col3:
         st.metric("Total Active Users", total_users)
+
+    # Month selector section
+    st.subheader("Monthly Earnings Analysis")
+    available_months = sorted(df['month_year'].unique())
+    selected_month = st.selectbox("Select Month", available_months)
+    
+    # Filter data for selected month
+    monthly_data = df[df['month_year'] == selected_month]
+    
+    # Calculate user earnings for selected month
+    user_earnings = monthly_data.groupby('username')['payout_amount'].agg([
+        ('total_earnings', 'sum'),
+        ('tasks_completed', 'count'),
+        ('average_per_task', lambda x: x.mean())
+    ]).round(2)
+    
+    # Add hours worked
+    user_earnings['hours_worked'] = monthly_data.groupby('username')['duration_minutes'].sum() / 60
+    user_earnings['hours_worked'] = user_earnings['hours_worked'].round(1)
+    
+    # Calculate hourly rate
+    user_earnings['hourly_rate'] = (user_earnings['total_earnings'] / user_earnings['hours_worked']).round(2)
+    
+    # Sort by total earnings
+    user_earnings = user_earnings.sort_values('total_earnings', ascending=False)
+    
+    # Display monthly user earnings
+    st.subheader(f"User Earnings - {selected_month}")
+    
+    # Format the dataframe for display
+    display_df = user_earnings.copy()
+    display_df.columns = ['Total Earnings ($)', 'Tasks Completed', 'Avg $/Task', 'Hours Worked', '$/Hour']
+    
+    # Add dollar signs to monetary columns
+    display_df['Total Earnings ($)'] = display_df['Total Earnings ($)'].apply(lambda x: f"${x:,.2f}")
+    display_df['Avg $/Task'] = display_df['Avg $/Task'].apply(lambda x: f"${x:,.2f}")
+    display_df['$/Hour'] = display_df['$/Hour'].apply(lambda x: f"${x:,.2f}")
+    
+    st.dataframe(display_df, use_container_width=True)
+    
+    # Monthly Statistics
+    st.subheader("Monthly Statistics")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Total Monthly Earnings", f"${monthly_data['payout_amount'].sum():,.2f}")
+    with col2:
+        monthly_hours = monthly_data['duration_minutes'].sum() / 60
+        st.metric("Total Hours Worked", f"{monthly_hours:,.1f}")
+    with col3:
+        avg_hourly = monthly_data['payout_amount'].sum() / (monthly_hours if monthly_hours > 0 else 1)
+        st.metric("Average Hourly Rate", f"${avg_hourly:,.2f}")
+    
+    # Overall trends and visualizations section
+    st.subheader("Overall Platform Trends")
+    
+    # Month-wise earnings per user
+    monthly_earnings = df.pivot_table(
+        index='username',
+        columns='month_year',
+        values='payout_amount',
+        aggfunc='sum',
+        fill_value=0
+    ).round(2)
+    
+    # Add total column
+    monthly_earnings['Total'] = monthly_earnings.sum(axis=1)
+    
+    # Sort by total earnings
+    monthly_earnings = monthly_earnings.sort_values('Total', ascending=False)
+    
+    # Display monthly earnings table
+    st.dataframe(monthly_earnings, use_container_width=True)
+    
+    # Monthly earnings trend chart
+    monthly_trend = df.groupby(['month_year', 'username'])['payout_amount'].sum().reset_index()
+    trend_chart = px.line(
+        monthly_trend,
+        x='month_year',
+        y='payout_amount',
+        color='username',
+        title="Monthly Earnings Trend by User",
+        labels={'month_year': 'Month', 'payout_amount': 'Earnings ($)', 'username': 'User'}
+    )
+    st.plotly_chart(trend_chart, use_container_width=True)
     
     # User Performance Analysis
     st.subheader("User Performance Overview")
@@ -212,15 +295,12 @@ def show_admin_dashboard(df):
         st.plotly_chart(time_chart, use_container_width=True)
     
     # Detailed user metrics table
-    # In the show_admin_dashboard function, update the detailed metrics section:
-
-# Detailed user metrics table
     st.subheader("Detailed User Metrics")
     detailed_metrics = user_metrics_df.copy()
     detailed_metrics['avg_hourly_rate'] = detailed_metrics['avg_hourly_rate'].round(2)
     detailed_metrics['total_earnings'] = detailed_metrics['total_earnings'].round(2)
     
-    # Fix the column ordering - ensure username appears first
+    # Fix the column ordering
     detailed_metrics = detailed_metrics[[
         'username',
         'total_earnings',
@@ -303,96 +383,88 @@ def admin_panel():
     
     if st.button("Add User"):
         if new_username and new_password:
-            users = load_users()
-            if new_username in users:
-                st.error("Username already exists")
-            else:
-                save_user(new_username, new_password)
+            if create_user(new_username, new_password):
                 st.success(f"User '{new_username}' created successfully!")
+            else:
+                st.error("Error creating user")
         else:
             st.error("Please fill in both fields")
     
     # View/Delete Users
     st.subheader("Existing Users")
-    users = load_users()
-    user_data = []
-    
-    for username, data in users.items():
-        user_data.append({
-            "Username": username,
-            "Role": data["role"]
-        })
-    
-    user_df = pd.DataFrame(user_data)
-    st.dataframe(user_df, use_container_width=True)
-    
-    # Delete User
-    user_to_delete = st.selectbox("Select user to delete", 
-                                 [u["Username"] for u in user_data if u["Role"] != "admin"])
-    if st.button("Delete User"):
-        if user_to_delete:
-            users = load_users()
-            if users[user_to_delete]["role"] != "admin":
-                del users[user_to_delete]
-                with open(USERS_FILE, "w") as f:
-                    json.dump(users, f)
-                st.success(f"User '{user_to_delete}' deleted successfully!")
-                st.rerun()
+    try:
+        response = supabase.table('users').select('*').execute()
+        if response.data:
+            user_df = pd.DataFrame(response.data)
+            st.dataframe(user_df[['username', 'role']], use_container_width=True)
+            
+            # Delete User
+            non_admin_users = user_df[user_df['role'] != 'admin']['username'].tolist()
+            user_to_delete = st.selectbox("Select user to delete", non_admin_users)
+            
+            if st.button("Delete User"):
+                if user_to_delete:
+                    try:
+                        # Delete user's work data first
+                        supabase.table('work_data').delete().eq('username', user_to_delete).execute()
+                        # Then delete the user
+                        supabase.table('users').delete().eq('username', user_to_delete).execute()
+                        st.success(f"User '{user_to_delete}' deleted successfully!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error deleting user: {str(e)}")
+    except Exception as e:
+        st.error(f"Error loading users: {str(e)}")
 
 def show_dashboard():
     if not st.session_state.get('uploaded_file'):
         uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
         if uploaded_file:
             try:
-                # Read and process the uploaded file
                 df = pd.read_csv(uploaded_file)
-                
-                # Validate the dataframe
                 validate_dataframe(df)
-                
-                # Process the dataframe
-                df = process_dataframe(df)
-                
-                # Save the processed data
-                save_uploaded_data(df, st.session_state.username)
-                st.success("File uploaded and processed successfully!")
-                st.session_state.uploaded_file = uploaded_file
-                
+                if save_uploaded_data(df, st.session_state.username):
+                    st.success("File uploaded and processed successfully!")
+                    st.session_state.uploaded_file = uploaded_file
             except Exception as e:
                 st.error(f"Error processing file: {str(e)}")
                 return
     
-    # Load appropriate data based on user role
     if st.session_state.user_role == "admin":
         df = load_all_users_data()
     else:
         df = load_user_data(st.session_state.username)
     
     if df is not None:
-        # Show appropriate dashboard based on user role
         if st.session_state.user_role == "admin":
             show_admin_dashboard(df)
         else:
             show_user_dashboard(df)
         
-        # Option to clear uploaded file
-        if st.button("Clear uploaded file"):
-            if st.session_state.user_role != "admin":
-                # Remove user's data file
-                file_path = Path("data/user_data") / f"{st.session_state.username}_data.csv"
-                if file_path.exists():
-                    file_path.unlink()
-            st.session_state.uploaded_file = None
-            st.rerun()
+        if st.button("Clear uploaded data"):
+            try:
+                if st.session_state.user_role != "admin":
+                    supabase.table('work_data').delete().eq('username', st.session_state.username).execute()
+                st.session_state.uploaded_file = None
+                st.success("Data cleared successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error clearing data: {str(e)}")
     else:
         st.info("No data available. Please upload a CSV file.")
 
 def main():
-    # Initialize session states
+    # Initialize all session states
     if 'logged_in' not in st.session_state:
         st.session_state.logged_in = False
     if 'show_admin' not in st.session_state:
         st.session_state.show_admin = False
+    if 'user_role' not in st.session_state:
+        st.session_state.user_role = None
+    if 'username' not in st.session_state:
+        st.session_state.username = None
+    if 'uploaded_file' not in st.session_state:
+        st.session_state.uploaded_file = None
     
     # Sidebar logout button if logged in
     if st.session_state.logged_in:
